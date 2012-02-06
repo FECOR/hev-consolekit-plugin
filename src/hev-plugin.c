@@ -21,7 +21,7 @@ typedef struct _HevPluginPrivate HevPluginPrivate;
 
 struct _HevPluginPrivate
 {
-	NPWindow window;
+	NPWindow *window;
 };
 
 static NPNetscapeFuncs *netscape_funcs;
@@ -203,18 +203,10 @@ NPError NPP_SetWindow(NPP instance, NPWindow *window)
 	g_return_val_if_fail(instance, NPERR_INVALID_INSTANCE_ERROR);
 
 	/* Check re-enter */
-	if((window->window==priv->window.window) &&
-			(window->x==priv->window.x) &&
-			(window->y==priv->window.y) &&
-			(window->width==priv->window.width) &&
-			(window->height==priv->window.height))
+	if(priv->window == window)
 	  return NPERR_NO_ERROR;
 
-	priv->window.window = window->window;
-	priv->window.x = window->x;
-	priv->window.y = window->y;
-	priv->window.width = window->width;
-	priv->window.height = window->height;
+	priv->window = window;
 
 	plug = gtk_plug_new((GdkNativeWindow)window->window);
 	gtk_widget_show(plug);
