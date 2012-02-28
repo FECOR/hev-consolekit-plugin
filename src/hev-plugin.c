@@ -219,6 +219,14 @@ bool NPN_InvokeDefault(NPP npp, NPObject *npobj, const NPVariant *args,
 				args, arg_count, result);
 }
 
+bool NPN_GetProperty(NPP npp, NPObject *npobj, NPIdentifier name,
+			NPVariant *result)
+{
+	g_debug("%s:%d[%s]", __FILE__, __LINE__, __FUNCTION__);
+
+	return netscape_funcs->getproperty(npp, npobj, name, result);
+}
+
 void NPN_ReleaseVariantValue(NPVariant *variant)
 {
 	g_debug("%s:%d[%s]", __FILE__, __LINE__, __FUNCTION__);
@@ -441,6 +449,10 @@ static bool NPO_Invoke(NPObject *npobj, NPIdentifier name,
 	HevScriptableObj *obj = (HevScriptableObj *)npobj;
 	HevPluginPrivate *priv = (HevPluginPrivate *)obj->npp->pdata;
 	NPObject *func_obj = NULL;
+	NPObject *window_obj = NULL, *location_obj = NULL;
+	NPIdentifier identifier = 0;
+	NPVariant var = { 0 };
+	NPString protocol = { 0 };
 
 	g_debug("%s:%d[%s]", __FILE__, __LINE__, __FUNCTION__);
 	g_return_val_if_fail(priv->dbus_proxy, PR_TRUE);
@@ -448,6 +460,37 @@ static bool NPO_Invoke(NPObject *npobj, NPIdentifier name,
 	g_return_val_if_fail(NPVARIANT_IS_OBJECT(args[0]), PR_TRUE);
 
 	func_obj = NPVARIANT_TO_OBJECT(args[0]);
+
+	/* Security check */
+	NPN_GetValue(obj->npp, NPNVWindowNPObject, &window_obj);
+	identifier = NPN_GetStringIdentifier("location");
+	if(!NPN_GetProperty(obj->npp, window_obj, identifier, &var))
+	{
+		NPN_ReleaseObject(window_obj);
+		return PR_FALSE;
+	}
+
+	location_obj = NPVARIANT_TO_OBJECT(var);
+	NPN_ReleaseObject(window_obj);
+
+	identifier = NPN_GetStringIdentifier("protocol");
+	if(!NPN_GetProperty(obj->npp, location_obj, identifier, &var))
+	{
+		NPN_ReleaseObject(location_obj);
+		return PR_FALSE;
+	}
+
+	protocol = NPVARIANT_TO_STRING(var);
+	if(0 != g_ascii_strncasecmp(protocol.UTF8Characters,
+					"file:", 5))
+	{
+		NPN_ReleaseVariantValue(&var);
+		NPN_ReleaseObject(location_obj);
+		return PR_FALSE;
+	}
+
+	NPN_ReleaseVariantValue(&var);
+	NPN_ReleaseObject(location_obj);
 
 	if(name == npi_restart)
 	{
