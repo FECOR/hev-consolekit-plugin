@@ -1,0 +1,47 @@
+HevConsoleKit Documentation
+
+Usage
+
+<html>
+	<head>
+		...
+	</head>
+	<body>
+		...
+
+		<object type="application/x-hevconsolekit" id="HevConsoleKit"></object>
+
+		...
+	</body>
+</html>
+
+Script API
+
+Method Name		Arguments		Return			Descripition
+Restart			Function		NULL|BOOLEAN	Restart system.
+CanRestart		Function		NULL|BOOLEAN	Can restart system?
+Stop			Function		NULL|BOOLEAN	Stop system.
+CanStop			Function		NULL|BOOLEAN	Can stop system?
+
+Script example
+
+<script type="text/javascript">
+	var plugin = document.getElementById("HevConsoleKit");
+
+	function RestartHandler(s)
+	{
+		alert(s);
+	}
+
+	function CanRestartHandler(s)
+	{
+		if(true == s)
+		  plugin.Restart(RestartHandler);
+	}
+
+	function TryRestart()
+	{
+		plugin.CanRestart(CanRestartHandler);
+	}
+</script>
+
