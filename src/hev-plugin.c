@@ -6,25 +6,25 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <glib.h>
 #include <nspr.h>
 #include <npapi.h>
 #include <npruntime.h>
 #include <npfunctions.h>
-#include <gtk/gtk.h>
+#include <gio/gio.h>
 
 #include "hev-plugin.h"
 
-#define PLUGIN_NAME         "HevPlugin"
-#define PLUGIN_MIME_TYPES   "application/x-hevplugin"
-#define PLUGIN_DESCRIPTION  "HevPlugin demo"
+#define PLUGIN_NAME         "HevConsoleKit"
+#define PLUGIN_MIME_TYPES   "application/x-hevconsolekit"
+#define PLUGIN_DESCRIPTION  "ConsoleKit controller plugin."
 
 typedef struct _HevPluginPrivate HevPluginPrivate;
 
 struct _HevPluginPrivate
 {
-	NPWindow *window;
-	GtkWidget *entry;
 	NPObject *obj;
+	GDBusProxy *dbus_proxy;
 };
 
 typedef struct _HevScriptableObj HevScriptableObj;
@@ -35,10 +35,12 @@ struct _HevScriptableObj
 	NPP npp;
 };
 
-static NPNetscapeFuncs *netscape_funcs;
+static NPNetscapeFuncs *netscape_funcs = NULL;
 static NPClass npklass = { 0 };
-static NPIdentifier npi_get_text = { 0 };
-static NPIdentifier npi_set_text = { 0 };
+static NPIdentifier npi_can_restart = { 0 };
+static NPIdentifier npi_restart = { 0 };
+static NPIdentifier npi_can_stop = { 0 };
+static NPIdentifier npi_stop = { 0 };
 
 static NPObject * NPO_Allocate(NPP npp, NPClass *klass);
 static void NPO_Deallocate(NPObject *npobj);
@@ -50,6 +52,17 @@ static bool NPO_Invoke(NPObject *npobj, NPIdentifier name,
 static void g_debug_log_null_handler(const gchar *domain,
 			GLogLevelFlags level, const gchar *message,
 			gpointer user_data);
+
+static void g_dbus_proxy_new_for_bus_handler(GObject *source_object,
+			GAsyncResult *res, gpointer user_data);
+static void g_dbus_proxy_call_restart_handler(GObject *source_object,
+			GAsyncResult *res, gpointer user_data);
+static void g_dbus_proxy_call_can_restart_handler(GObject *source_object,
+			GAsyncResult *res, gpointer user_data);
+static void g_dbus_proxy_call_stop_handler(GObject *source_object,
+			GAsyncResult *res, gpointer user_data);
+static void g_dbus_proxy_call_can_stop_handler(GObject *source_object,
+			GAsyncResult *res, gpointer user_data);
 
 NP_EXPORT(NPError) NP_Initialize(NPNetscapeFuncs *npn_funcs, NPPluginFuncs *npp_funcs)
 {
@@ -94,8 +107,10 @@ NP_EXPORT(NPError) NP_Initialize(NPNetscapeFuncs *npn_funcs, NPPluginFuncs *npp_
 	npklass.invoke = NPO_Invoke;
 
 	/* NP Object method property identifier */
-	npi_get_text = NPN_GetStringIdentifier("get_text");
-	npi_set_text = NPN_GetStringIdentifier("set_text");
+	npi_can_restart = NPN_GetStringIdentifier("CanRestart");
+	npi_restart = NPN_GetStringIdentifier("Restart");
+	npi_can_stop = NPN_GetStringIdentifier("CanStop");
+	npi_stop = NPN_GetStringIdentifier("Stop");
 
 	/* GTK+ Initialize */
 	gtk_init(0, 0);
@@ -195,6 +210,22 @@ void NPN_ReleaseObject(NPObject *npobj)
 	return netscape_funcs->releaseobject(npobj);
 }
 
+bool NPN_InvokeDefault(NPP npp, NPObject *npobj, const NPVariant *args,
+                       uint32_t arg_count, NPVariant *result)
+{
+	g_debug("%s:%d[%s]", __FILE__, __LINE__, __FUNCTION__);
+
+	return netscape_funcs->invokeDefault(npp, npobj,
+				args, arg_count, result);
+}
+
+void NPN_ReleaseVariantValue(NPVariant *variant)
+{
+	g_debug("%s:%d[%s]", __FILE__, __LINE__, __FUNCTION__);
+
+	netscape_funcs->releasevariantvalue(variant);
+}
+
 NPError NPP_New(NPMIMEType plugin_type, NPP instance,
 			uint16_t mode, int16_t argc, char* argn[], char* argv[],
 			NPSavedData *saved)
@@ -247,13 +278,26 @@ NPError NPP_New(NPMIMEType plugin_type, NPP instance,
 	  g_log_set_handler(NULL, G_LOG_LEVEL_DEBUG,
 				  g_debug_log_null_handler, NULL);
 
+	/* DBus Proxy */
+	g_dbus_proxy_new_for_bus(G_BUS_TYPE_SYSTEM,
+				G_DBUS_PROXY_FLAGS_NONE, NULL,
+				"org.freedesktop.ConsoleKit",
+				"/org/freedesktop/ConsoleKit/Manager",
+				"org.freedesktop.ConsoleKit.Manager",
+				NULL,
+				g_dbus_proxy_new_for_bus_handler,
+				instance);
+
 	return NPERR_NO_ERROR;
 }
 
 NPError NPP_Destroy(NPP instance, NPSavedData **saved)
 {
+	HevPluginPrivate *priv = (HevPluginPrivate *)instance->pdata;
+
 	g_debug("%s:%d[%s]", __FILE__, __LINE__, __FUNCTION__);
 
+	g_object_unref(G_OBJECT(priv->dbus_proxy));
 	NPN_MemFree(instance->pdata);
 
 	return NPERR_NO_ERROR;
@@ -262,24 +306,10 @@ NPError NPP_Destroy(NPP instance, NPSavedData **saved)
 NPError NPP_SetWindow(NPP instance, NPWindow *window)
 {
 	HevPluginPrivate *priv = (HevPluginPrivate*)instance->pdata;
-	GtkWidget *plug = NULL;
 
 	g_debug("%s:%d[%s]", __FILE__, __LINE__, __FUNCTION__);
 	
 	g_return_val_if_fail(instance, NPERR_INVALID_INSTANCE_ERROR);
-
-	/* Check re-enter */
-	if(priv->window == window)
-	  return NPERR_NO_ERROR;
-
-	priv->window = window;
-
-	plug = gtk_plug_new((GdkNativeWindow)window->window);
-	gtk_widget_show(plug);
-
-	priv->entry = gtk_entry_new();
-	gtk_container_add(GTK_CONTAINER(plug), priv->entry);
-	gtk_widget_show(priv->entry);
 
 	return NPERR_NO_ERROR;
 }
@@ -410,51 +440,234 @@ static bool NPO_Invoke(NPObject *npobj, NPIdentifier name,
 {
 	HevScriptableObj *obj = (HevScriptableObj *)npobj;
 	HevPluginPrivate *priv = (HevPluginPrivate *)obj->npp->pdata;
+	NPObject *func_obj = NULL;
 
 	g_debug("%s:%d[%s]", __FILE__, __LINE__, __FUNCTION__);
+	g_return_val_if_fail(priv->dbus_proxy, PR_TRUE);
+	g_return_val_if_fail((1==arg_count), PR_TRUE);
+	g_return_val_if_fail(NPVARIANT_IS_OBJECT(args[0]), PR_TRUE);
 
-	if(name == npi_get_text)
+	func_obj = NPVARIANT_TO_OBJECT(args[0]);
+
+	if(name == npi_restart)
 	{
-		const gchar *text = NULL;
+		NPN_RetainObject(func_obj);
+		g_dbus_proxy_call(priv->dbus_proxy,
+					"Restart", NULL,
+					G_DBUS_CALL_FLAGS_NONE,
+					5000, NULL,
+					g_dbus_proxy_call_restart_handler,
+					(gpointer)func_obj);
 
-		text = gtk_entry_get_text(GTK_ENTRY(priv->entry));
-		STRINGZ_TO_NPVARIANT(g_strdup(text), *result);
-
-		return true;
+		return PR_TRUE;
 	}
-	else if(name == npi_set_text)
+	else if(name == npi_can_restart)
 	{
-		if(1 == arg_count)
-		{
-			GtkEntryBuffer *entry_buffer = NULL;
-			NPString str = NPVARIANT_TO_STRING(args[0]);
+		NPN_RetainObject(func_obj);
+		g_dbus_proxy_call(priv->dbus_proxy,
+					"CanRestart", NULL,
+					G_DBUS_CALL_FLAGS_NONE,
+					5000, NULL,
+					g_dbus_proxy_call_can_restart_handler,
+					(gpointer)func_obj);
 
-			entry_buffer = gtk_entry_get_buffer(GTK_ENTRY(priv->entry));
-			gtk_entry_buffer_set_text(entry_buffer, str.UTF8Characters,
-						str.UTF8Length);
+		return PR_TRUE;
+	}
+	else if(name == npi_stop)
+	{
+		NPN_RetainObject(func_obj);
+		g_dbus_proxy_call(priv->dbus_proxy,
+					"Stop", NULL,
+					G_DBUS_CALL_FLAGS_NONE,
+					5000, NULL,
+					g_dbus_proxy_call_stop_handler,
+					(gpointer)func_obj);
 
-			return true;
-		}
+		return PR_TRUE;
+	}
+	else if(name == npi_can_stop)
+	{
+		NPN_RetainObject(func_obj);
+		g_dbus_proxy_call(priv->dbus_proxy,
+					"CanStop", NULL,
+					G_DBUS_CALL_FLAGS_NONE,
+					5000, NULL,
+					g_dbus_proxy_call_can_stop_handler,
+					(gpointer)func_obj);
+
+		return PR_TRUE;
 	}
 
-	return false;
+	return PR_TRUE;
 }
 
 static bool NPO_HasMethod(NPObject *npobj, NPIdentifier method_name)
 {
 	g_debug("%s:%d[%s]", __FILE__, __LINE__, __FUNCTION__);
 
-	if(method_name == npi_get_text)
-	  return true;
-	else if(method_name == npi_set_text)
-	  return true;
+	if(method_name == npi_can_restart)
+	  return PR_TRUE;
+	else if(method_name == npi_restart)
+	  return PR_TRUE;
+	else if(method_name == npi_can_stop)
+	  return PR_TRUE;
+	else if(method_name == npi_stop)
+	  return PR_TRUE;
 
-	return false;
+	return PR_TRUE;
 }
 
 static void g_debug_log_null_handler(const gchar *domain,
 			GLogLevelFlags level, const gchar *message,
 			gpointer user_data)
 {
+}
+
+static void g_dbus_proxy_new_for_bus_handler(GObject *source_object,
+			GAsyncResult *res, gpointer user_data)
+{
+	NPP instance = user_data;
+	HevPluginPrivate *priv = (HevPluginPrivate *)instance->pdata;
+
+	g_debug("%s:%d[%s]", __FILE__, __LINE__, __FUNCTION__);
+
+	priv->dbus_proxy = g_dbus_proxy_new_for_bus_finish(res, NULL);
+	g_object_set_data(G_OBJECT(priv->dbus_proxy), "npp", instance);
+}
+
+static void g_dbus_proxy_call_restart_handler(GObject *source_object,
+			GAsyncResult *res, gpointer user_data)
+{
+	NPP instance = NULL;
+	NPObject *func_obj = user_data;
+	GVariant *retval = NULL;
+	NPVariant val = { 0 }, rval = { 0 };
+
+	g_debug("%s:%d[%s]", __FILE__, __LINE__, __FUNCTION__);
+
+	instance = g_object_get_data(source_object, "npp");
+
+	retval = g_dbus_proxy_call_finish(G_DBUS_PROXY(source_object),
+				res, NULL);
+
+	if(retval)
+	{
+		BOOLEAN_TO_NPVARIANT(PR_TRUE, val);
+		g_variant_unref(retval);
+	}
+	else
+	{
+		NULL_TO_NPVARIANT(val);
+	}
+
+	NPN_InvokeDefault(instance, func_obj, &val, 1, &rval);
+
+	NPN_ReleaseVariantValue(&val);
+	NPN_ReleaseVariantValue(&rval);
+	NPN_ReleaseObject(func_obj);
+}
+
+static void g_dbus_proxy_call_can_restart_handler(GObject *source_object,
+			GAsyncResult *res, gpointer user_data)
+{
+	NPP instance = NULL;
+	NPObject *func_obj = user_data;
+	GVariant *retval = NULL;
+	NPVariant val = { 0 }, rval = { 0 };
+
+	g_debug("%s:%d[%s]", __FILE__, __LINE__, __FUNCTION__);
+
+	instance = g_object_get_data(source_object, "npp");
+
+	retval = g_dbus_proxy_call_finish(G_DBUS_PROXY(source_object),
+				res, NULL);
+
+	if(retval)
+	{
+		GVariant *vbool = NULL;
+
+		vbool = g_variant_get_child_value(retval, 0);
+		BOOLEAN_TO_NPVARIANT(g_variant_get_boolean(vbool), val);
+
+		g_variant_unref(retval);
+	}
+	else
+	{
+		NULL_TO_NPVARIANT(val);
+	}
+
+	NPN_InvokeDefault(instance, func_obj, &val, 1, &rval);
+
+	NPN_ReleaseVariantValue(&val);
+	NPN_ReleaseVariantValue(&rval);
+	NPN_ReleaseObject(func_obj);
+}
+
+static void g_dbus_proxy_call_stop_handler(GObject *source_object,
+			GAsyncResult *res, gpointer user_data)
+{
+	NPP instance = NULL;
+	NPObject *func_obj = user_data;
+	GVariant *retval = NULL;
+	NPVariant val = { 0 }, rval = { 0 };
+
+	g_debug("%s:%d[%s]", __FILE__, __LINE__, __FUNCTION__);
+
+	instance = g_object_get_data(source_object, "npp");
+
+	retval = g_dbus_proxy_call_finish(G_DBUS_PROXY(source_object),
+				res, NULL);
+
+	if(retval)
+	{
+		BOOLEAN_TO_NPVARIANT(PR_TRUE, val);
+		g_variant_unref(retval);
+	}
+	else
+	{
+		NULL_TO_NPVARIANT(val);
+	}
+
+	NPN_InvokeDefault(instance, func_obj, &val, 1, &rval);
+
+	NPN_ReleaseVariantValue(&val);
+	NPN_ReleaseVariantValue(&rval);
+	NPN_ReleaseObject(func_obj);
+}
+
+static void g_dbus_proxy_call_can_stop_handler(GObject *source_object,
+			GAsyncResult *res, gpointer user_data)
+{
+	NPP instance = NULL;
+	NPObject *func_obj = user_data;
+	GVariant *retval = NULL;
+	NPVariant val = { 0 }, rval = { 0 };
+
+	g_debug("%s:%d[%s]", __FILE__, __LINE__, __FUNCTION__);
+
+	instance = g_object_get_data(source_object, "npp");
+
+	retval = g_dbus_proxy_call_finish(G_DBUS_PROXY(source_object),
+				res, NULL);
+
+	if(retval)
+	{
+		GVariant *vbool = NULL;
+
+		vbool = g_variant_get_child_value(retval, 0);
+		BOOLEAN_TO_NPVARIANT(g_variant_get_boolean(vbool), val);
+
+		g_variant_unref(retval);
+	}
+	else
+	{
+		NULL_TO_NPVARIANT(val);
+	}
+
+	NPN_InvokeDefault(instance, func_obj, &val, 1, &rval);
+
+	NPN_ReleaseVariantValue(&val);
+	NPN_ReleaseVariantValue(&rval);
+	NPN_ReleaseObject(func_obj);
 }
 

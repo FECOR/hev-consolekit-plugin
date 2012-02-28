@@ -2,8 +2,8 @@
  
 PP=cpp
 CC=gcc
-CCFLAGS=-g -fPIC `pkg-config --cflags gtk+-2.0 nspr libxul`
-LDFLAGS=-shared `pkg-config --libs gtk+-2.0 nspr libxul`
+CCFLAGS=-g -fPIC `pkg-config --cflags glib-2.0 gio-2.0 nspr libxul`
+LDFLAGS=-shared `pkg-config --libs glib-2.0 gio-2.0 nspr libxul`
  
 SRCDIR=src
 BINDIR=bin
